@@ -100,3 +100,86 @@ Use `--reverify` to review them and `--start N` to begin after row `N`.
 The verifier builds a complete temporary CSV and atomically replaces the original
 when you quit, so the CSV cannot be left half-written. If it is interrupted while
 copying or displaying rather than at the prompt, the original CSV remains unchanged.
+
+## 5. Verify labels in a web browser
+
+The PHP verifier provides the same sequential labeling workflow without Kitty,
+Python packages, Composer, or a framework. It requires PHP 8.1 or newer with
+PDO SQLite and Fileinfo enabled.
+
+Start it locally from the repository root:
+
+```bash
+php -S 127.0.0.1:8080 -t web
+```
+
+Then open `http://127.0.0.1:8080`. On the first visit, click **Initialize
+verifier**. The browser incrementally imports `dataset/labels.csv` into
+`dataset/verification.sqlite`; progress is resumable if the page or server is
+stopped.
+
+Each accepted label is immediately committed to SQLite. ASCII, Persian, and
+Arabic digits are accepted and normalized to ASCII. Enter saves and advances;
+an empty Enter or **Skip for now** leaves the row unverified and advances. Recent
+labels can be opened and corrected without moving the main queue.
+
+The page deliberately does not rewrite the large CSV after every answer. The
+header shows how many rows have not yet been copied back. Click **Sync
+labels.csv** before training, copying the dataset, or using another Python tool.
+Sync writes a complete neighboring temporary file and atomically replaces
+`labels.csv`; a failed write leaves the existing CSV unchanged.
+
+Do not run `verify_labels.py`, the downloader, or another process that changes
+`labels.csv` while the web verifier is active. The page detects an external CSV
+change and stops rather than overwriting it. To move the dataset to another
+machine, sync first and copy the dataset normally; the destination can rebuild
+its SQLite state from the synced CSV.
+
+### Use another dataset directory
+
+The default dataset is the repository's `dataset/` directory. Set
+`OCR_DATASET_DIR` to use another location:
+
+```bash
+OCR_DATASET_DIR=/data/persian-ocr \
+  php -S 127.0.0.1:8080 -t web
+```
+
+`OCR_STATE_PATH` can optionally place `verification.sqlite` elsewhere. The PHP
+process must be able to read the CSV and images and write the SQLite database,
+its lock/WAL files, and temporary CSV files. Grant the PHP-FPM user ownership or
+a targeted ACL; do not make the directory world-writable.
+
+### Minimal Nginx configuration
+
+Use `web/` as the public document root so the CSV, SQLite state, images, and
+Python source files are not directly downloadable. The page safely streams the
+selected image itself.
+
+```nginx
+server {
+    listen 80;
+    server_name verifier.example.internal;
+    root /srv/tci-ocr/web;
+    index index.php;
+
+    location / {
+        try_files $uri /index.php?$query_string;
+    }
+
+    location = /index.php {
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root/index.php;
+        fastcgi_param OCR_DATASET_DIR /srv/tci-ocr/dataset;
+        fastcgi_pass unix:/run/php/php8.3-fpm.sock;
+    }
+
+    location ~ \.php$ {
+        return 404;
+    }
+}
+```
+
+Adjust the PHP-FPM socket and paths for the server. The application intentionally
+contains no authentication; add Nginx basic authentication to the `server` or
+`location /` block, or expose it only on a private network.
