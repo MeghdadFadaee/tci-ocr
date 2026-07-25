@@ -742,6 +742,8 @@ function renderHeader(string $title): void
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#101114">
+    <link rel="icon" type="image/svg+xml" href="favicon.svg">
     <title><?= h($title) ?> · OCR verifier</title>
     <style>
         :root {
