@@ -60,6 +60,14 @@ function requestAction(): string
     return (string) ($_POST['action'] ?? $_GET['action'] ?? '');
 }
 
+function wantsJson(): bool
+{
+    return str_contains(
+        strtolower((string) ($_SERVER['HTTP_ACCEPT'] ?? '')),
+        'application/json',
+    );
+}
+
 function sourceStats(string $path): array
 {
     clearstatcache(true, $path);
@@ -733,6 +741,41 @@ function recentRows(PDO $db): array
     )->fetchAll();
 }
 
+function verifierSnapshot(array $config, string $status): array
+{
+    $db = openDatabase($config);
+    requireReady($db);
+    verifySourceUnchanged($db, $config);
+
+    $row = currentRow($db);
+    $total = (int) metadata($db, 'total_count', '0');
+    $verified = (int) metadata($db, 'verified_count', '0');
+    $pending = (int) metadata($db, 'pending_count', '0');
+    $next = $row === null ? null : nextRowAfter($db, (int) $row['id']);
+
+    return [
+        'status' => $status,
+        'revision' => (int) metadata($db, 'revision', '0'),
+        'row' => $row === null ? null : [
+            'id' => (int) $row['id'],
+            'number' => (int) $row['id'] + 1,
+            'filename' => $row['filename'],
+            'label' => $row['label'],
+            'image_url' => '?action=image&id=' . (int) $row['id'],
+        ],
+        'stats' => [
+            'total' => $total,
+            'verified' => $verified,
+            'remaining' => max(0, $total - $verified),
+            'pending' => $pending,
+            'progress' => $total > 0 ? $verified * 100 / $total : 100,
+        ],
+        'next_image_url' => $next === null
+            ? null
+            : '?action=image&id=' . (int) $next['id'],
+    ];
+}
+
 function renderHeader(string $title): void
 {
     ?>
@@ -763,6 +806,7 @@ function renderHeader(string $title): void
         html { min-height: 100%; background: #101114; }
         body {
             min-height: 100vh;
+            min-height: 100dvh;
             margin: 0;
             color: var(--ink);
             font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -831,6 +875,7 @@ function renderHeader(string $title): void
         .workspace { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: .8rem; }
         .verify-card { min-height: 460px; padding: clamp(1.2rem, 4vw, 2.2rem); display: flex; flex-direction: column; }
         .card-meta { display: flex; align-items: center; justify-content: space-between; gap: 1rem; color: var(--muted); font-size: .82rem; }
+        .mobile-counts, .mobile-label { display: none; }
         .filename { max-width: 70%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, monospace; }
         .image-stage {
             flex: 1; min-height: 190px; display: grid; place-items: center; margin: 1.25rem 0;
@@ -869,21 +914,119 @@ function renderHeader(string $title): void
         .sync button { width: 100%; }
         .notice { margin-bottom: .8rem; padding: .85rem 1rem; border: 1px solid rgba(131,219,181,.25); border-radius: .85rem; color: var(--success); background: rgba(131,219,181,.07); }
         .notice.error { color: var(--danger); border-color: rgba(255,141,145,.25); background: rgba(255,141,145,.07); }
+        .fast-toast {
+            position: fixed;
+            z-index: 20;
+            top: max(.65rem, env(safe-area-inset-top));
+            left: 50%;
+            max-width: min(92vw, 30rem);
+            padding: .65rem .9rem;
+            border: 1px solid rgba(131,219,181,.32);
+            border-radius: 999px;
+            color: var(--success);
+            background: rgba(20, 28, 25, .96);
+            box-shadow: 0 14px 38px rgba(0,0,0,.35);
+            font-size: .82rem;
+            font-weight: 750;
+            opacity: 0;
+            pointer-events: none;
+            transform: translate(-50%, -1rem);
+            transition: opacity .16s ease, transform .16s ease;
+        }
+        .fast-toast.visible { opacity: 1; transform: translate(-50%, 0); }
+        .fast-toast.error {
+            color: var(--danger);
+            border-color: rgba(255,141,145,.32);
+            background: rgba(35, 22, 24, .97);
+        }
         .complete { min-height: 460px; display: grid; place-items: center; padding: 2rem; text-align: center; }
         .complete-mark { margin: 0 auto 1rem; display: grid; place-items: center; width: 4rem; height: 4rem; border-radius: 50%; color: #102018; background: var(--success); font-size: 2rem; font-weight: 900; }
         .error-details { overflow-wrap: anywhere; color: var(--danger); }
         .visually-hidden { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
         @media (max-width: 760px) {
-            .shell { width: min(100% - 1rem, 680px); padding-top: 1rem; }
-            .workspace { grid-template-columns: 1fr; }
-            .stats { gap: .45rem; }
-            .stat { padding: .8rem; }
-            .stat-value { font-size: 1.1rem; }
-            .label-form { grid-template-columns: 1fr; }
-            .label-form button { width: 100%; }
-            .sidebar { order: 2; }
-            .image-stage { min-height: 160px; }
-            .topbar { margin-bottom: 1rem; }
+            body { min-height: 100dvh; }
+            .shell {
+                width: min(100% - .7rem, 680px);
+                padding: .45rem 0 max(1rem, env(safe-area-inset-bottom));
+            }
+            .topbar {
+                min-height: 2.35rem;
+                margin-bottom: .4rem;
+                padding: 0 .25rem;
+            }
+            .brand { gap: .5rem; font-size: .9rem; }
+            .brand-mark { width: .55rem; height: .55rem; }
+            .topbar .pill { padding: .3rem .55rem; font-size: .68rem; }
+            body.entry-focused .topbar { display: none; }
+            .stats, .progress-panel { display: none; }
+            .workspace { grid-template-columns: 1fr; gap: .45rem; }
+            .verify-card {
+                min-height: 0;
+                max-height: calc(var(--visual-height, 100dvh) - .7rem);
+                padding: .65rem;
+                border-radius: 1rem;
+                overflow-y: auto;
+                scroll-margin-top: .35rem;
+            }
+            .card-meta { min-height: 1.6rem; gap: .5rem; font-size: .76rem; }
+            .filename { display: none; }
+            .mobile-counts { display: inline; margin-left: auto; font-variant-numeric: tabular-nums; }
+            .image-stage {
+                flex: none;
+                min-height: 0;
+                height: clamp(88px, 22svh, 132px);
+                margin: .45rem 0;
+                border-radius: .75rem;
+            }
+            .image-stage img { width: min(96%, 612px); max-height: 100%; object-fit: contain; }
+            .label-form {
+                grid-template-columns: minmax(0, 1fr) auto;
+                gap: .4rem;
+            }
+            .label-input {
+                min-height: 3.2rem;
+                padding: .55rem .75rem;
+                border-radius: .75rem;
+                font-size: 1.35rem;
+            }
+            .label-form button {
+                min-width: 4.7rem;
+                min-height: 3.2rem;
+                width: auto;
+                padding: .55rem .7rem;
+                border-radius: .75rem;
+            }
+            .desktop-label { display: none; }
+            .mobile-label { display: inline; }
+            .secondary-actions { min-height: 2.5rem; margin-top: .4rem; }
+            .secondary-actions button, .secondary-actions .button {
+                min-height: 2.35rem;
+                padding: .4rem .75rem;
+                font-size: .78rem;
+            }
+            .secondary-actions .hint { display: none; }
+            .sidebar {
+                order: 2;
+                padding: .55rem;
+                border-radius: .9rem;
+                box-shadow: none;
+            }
+            .sidebar-head, .recent-list, .sidebar > .hint { display: none; }
+            .sync { margin: 0; padding: 0; border: 0; }
+            .sync button { min-height: 2.5rem; padding: .45rem .75rem; font-size: .78rem; }
+            .sync .hint { display: none; }
+            .notice {
+                position: fixed;
+                z-index: 19;
+                top: max(.55rem, env(safe-area-inset-top));
+                left: .55rem;
+                right: .55rem;
+                margin: 0;
+                padding: .65rem .8rem;
+                box-shadow: 0 14px 38px rgba(0,0,0,.35);
+            }
+            body.entry-focused .sidebar { display: none; }
+            body.entry-focused .verify-card { border-color: rgba(255, 204, 102, .18); }
         }
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { scroll-behavior: auto !important; transition: none !important; }
@@ -1058,36 +1201,37 @@ function renderVerifier(array $config, ?string $error = null): never
 <main class="shell">
     <header class="topbar">
         <div class="brand"><span class="brand-mark"></span> OCR verifier</div>
-        <span class="pill"><?= $pending > 0 ? number_format($pending) . ' unsynced' : 'CSV up to date' ?></span>
+        <span class="pill" id="sync-pill"><?= $pending > 0 ? number_format($pending) . ' unsynced' : 'CSV up to date' ?></span>
     </header>
+    <div class="fast-toast" id="fast-toast" role="status" aria-live="polite"></div>
 
     <?php if ($error !== null): ?>
-        <div class="notice error"><?= h($error) ?></div>
+        <div class="notice error" id="page-notice"><?= h($error) ?></div>
     <?php elseif (isset($notices[$status])): ?>
-        <div class="notice"><?= h($notices[$status]) ?></div>
+        <div class="notice" id="page-notice"><?= h($notices[$status]) ?></div>
     <?php endif; ?>
 
     <section class="stats" aria-label="Dataset progress">
         <div class="panel stat">
             <div class="stat-label">Verified</div>
-            <div class="stat-value"><?= number_format($verified) ?></div>
+            <div class="stat-value" id="verified-count"><?= number_format($verified) ?></div>
         </div>
         <div class="panel stat">
             <div class="stat-label">Remaining</div>
-            <div class="stat-value"><?= number_format($remaining) ?></div>
+            <div class="stat-value" id="remaining-count"><?= number_format($remaining) ?></div>
         </div>
         <div class="panel stat">
             <div class="stat-label">Complete</div>
-            <div class="stat-value"><?= number_format($progress, 2) ?>%</div>
+            <div class="stat-value" id="complete-count"><?= number_format($progress, 2) ?>%</div>
         </div>
     </section>
     <section class="panel progress-panel">
         <div class="progress-copy">
-            <span><?= number_format($verified) ?> of <?= number_format($total) ?></span>
-            <span><?= number_format($pending) ?> pending CSV sync</span>
+            <span id="progress-summary"><?= number_format($verified) ?> of <?= number_format($total) ?></span>
+            <span id="pending-summary"><?= number_format($pending) ?> pending CSV sync</span>
         </div>
         <div class="progress-track">
-            <div class="progress-fill" style="width: <?= h(min(100, $progress)) ?>%"></div>
+            <div class="progress-fill" id="main-progress" style="width: <?= h(min(100, $progress)) ?>%"></div>
         </div>
     </section>
 
@@ -1103,11 +1247,13 @@ function renderVerifier(array $config, ?string $error = null): never
         <?php else: ?>
             <section class="panel verify-card">
                 <div class="card-meta">
-                    <span><?= $editing ? 'Correcting a recent label' : 'Row ' . number_format((int) $row['id'] + 1) ?></span>
-                    <span class="filename" title="<?= h($row['filename']) ?>"><?= h($row['filename']) ?></span>
+                    <span id="row-position"><?= $editing ? 'Correcting a recent label' : 'Row ' . number_format((int) $row['id'] + 1) ?></span>
+                    <span class="mobile-counts" id="mobile-counts"><?= number_format($verified) ?> done · <?= number_format($remaining) ?> left</span>
+                    <span class="filename" id="current-filename" title="<?= h($row['filename']) ?>"><?= h($row['filename']) ?></span>
                 </div>
                 <div class="image-stage">
                     <img
+                        id="captcha-image"
                         src="?action=image&amp;id=<?= (int) $row['id'] ?>"
                         alt="Number image for row <?= (int) $row['id'] + 1 ?>"
                         width="612"
@@ -1127,6 +1273,7 @@ function renderVerifier(array $config, ?string $error = null): never
                             name="label"
                             value="<?= h($row['label']) ?>"
                             inputmode="numeric"
+                            enterkeyhint="go"
                             autocomplete="off"
                             spellcheck="false"
                             maxlength="64"
@@ -1134,7 +1281,14 @@ function renderVerifier(array $config, ?string $error = null): never
                             placeholder="Type the number"
                             autofocus
                         >
-                        <button class="primary" type="submit"><?= $editing ? 'Save correction' : 'Save & next' ?></button>
+                        <button class="primary" type="submit" id="save-button">
+                            <?php if ($editing): ?>
+                                Save correction
+                            <?php else: ?>
+                                <span class="desktop-label">Save &amp; next</span>
+                                <span class="mobile-label">Next</span>
+                            <?php endif; ?>
+                        </button>
                     </div>
                 </form>
                 <div class="secondary-actions">
@@ -1173,7 +1327,7 @@ function renderVerifier(array $config, ?string $error = null): never
             <div class="sync">
                 <form method="post" onsubmit="return confirm('Rewrite labels.csv with all saved labels?')">
                     <input type="hidden" name="action" value="sync">
-                    <button type="submit" <?= $pending === 0 ? 'disabled' : '' ?>>
+                    <button type="submit" id="sync-button" <?= $pending === 0 ? 'disabled' : '' ?>>
                         Sync labels.csv
                     </button>
                 </form>
@@ -1190,10 +1344,133 @@ function renderVerifier(array $config, ?string $error = null): never
     const skip = document.querySelector('#skip-form');
     if (!input || !form) return;
 
+    const card = document.querySelector('.verify-card');
+    const image = document.querySelector('#captcha-image');
+    const saveButton = document.querySelector('#save-button');
+    const mobile = window.matchMedia('(max-width: 760px)');
+    const queueMode = form.elements.mode?.value === 'queue';
+    const formatter = new Intl.NumberFormat();
+    const toast = document.querySelector('#fast-toast');
+    let busy = false;
+    let toastTimer;
+    let viewportTimer;
+
     const digitMap = {
         '۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9',
         '٠':'0','١':'1','٢':'2','٣':'3','٤':'4','٥':'5','٦':'6','٧':'7','٨':'8','٩':'9'
     };
+
+    const fastEntryEnabled = () => mobile.matches && queueMode && skip;
+    const setText = (selector, value) => {
+        const element = document.querySelector(selector);
+        if (element) element.textContent = value;
+    };
+    const showToast = (message, isError = false) => {
+        if (!toast) return;
+        window.clearTimeout(toastTimer);
+        toast.textContent = message;
+        toast.classList.toggle('error', isError);
+        toast.classList.add('visible');
+        toastTimer = window.setTimeout(
+            () => toast.classList.remove('visible'),
+            isError ? 2600 : 650
+        );
+    };
+    const updateViewport = () => {
+        const viewport = window.visualViewport;
+        const height = viewport ? viewport.height : window.innerHeight;
+        document.documentElement.style.setProperty('--visual-height', `${height}px`);
+        if (mobile.matches && document.activeElement === input && card) {
+            window.clearTimeout(viewportTimer);
+            viewportTimer = window.setTimeout(
+                () => card.scrollIntoView({block: 'start', behavior: 'auto'}),
+                40
+            );
+        }
+    };
+    const focusEntry = () => {
+        if (!mobile.matches) return;
+        document.body.classList.add('entry-focused');
+        updateViewport();
+        window.setTimeout(updateViewport, 180);
+    };
+    const updateSnapshot = payload => {
+        if (!payload.row) {
+            window.location.reload();
+            return;
+        }
+
+        const {row, stats, revision} = payload;
+        document.querySelectorAll('input[name="row_id"]').forEach(
+            element => element.value = row.id
+        );
+        document.querySelectorAll('input[name="revision"]').forEach(
+            element => element.value = revision
+        );
+        setText('#row-position', `Row ${formatter.format(row.number)}`);
+        setText('#mobile-counts', `${formatter.format(stats.verified)} done · ${formatter.format(stats.remaining)} left`);
+        setText('#current-filename', row.filename);
+        const filename = document.querySelector('#current-filename');
+        if (filename) filename.title = row.filename;
+
+        setText('#verified-count', formatter.format(stats.verified));
+        setText('#remaining-count', formatter.format(stats.remaining));
+        setText('#complete-count', `${stats.progress.toFixed(2)}%`);
+        setText('#progress-summary', `${formatter.format(stats.verified)} of ${formatter.format(stats.total)}`);
+        setText('#pending-summary', `${formatter.format(stats.pending)} pending CSV sync`);
+        setText('#sync-pill', stats.pending > 0 ? `${formatter.format(stats.pending)} unsynced` : 'CSV up to date');
+        const progress = document.querySelector('#main-progress');
+        if (progress) progress.style.width = `${Math.min(100, stats.progress)}%`;
+        const syncButton = document.querySelector('#sync-button');
+        if (syncButton) syncButton.disabled = stats.pending === 0;
+
+        image.src = row.image_url;
+        image.alt = `Number image for row ${row.number}`;
+        input.value = row.label || '';
+        input.focus({preventScroll: true});
+        input.select();
+        focusEntry();
+
+        if (payload.next_image_url) {
+            const preload = new Image();
+            preload.src = payload.next_image_url;
+        }
+    };
+    const submitFast = async targetForm => {
+        if (busy) return;
+        busy = true;
+        saveButton.disabled = true;
+        try {
+            const response = await fetch('./', {
+                method: 'POST',
+                body: new FormData(targetForm),
+                headers: {'Accept': 'application/json'}
+            });
+            let payload;
+            try {
+                payload = await response.json();
+            } catch {
+                throw Object.assign(new Error('The server returned an invalid response.'), {status: response.status});
+            }
+            if (!response.ok) {
+                throw Object.assign(new Error(payload.error || 'Could not save the label.'), {status: response.status});
+            }
+            updateSnapshot(payload);
+            showToast(payload.status === 'skipped' ? 'Skipped' : 'Saved');
+        } catch (problem) {
+            showToast(problem.message || 'Connection error. Reloading the queue…', true);
+            if (problem.status === 422) {
+                input.focus({preventScroll: true});
+                input.select();
+            } else {
+                window.setTimeout(() => window.location.reload(), 1200);
+            }
+        } finally {
+            busy = false;
+            saveButton.disabled = false;
+        }
+    };
+
     input.addEventListener('input', () => {
         input.value = Array.from(input.value, character => digitMap[character] ?? character)
             .join('')
@@ -1203,10 +1480,47 @@ function renderVerifier(array $config, ?string $error = null): never
         if (input.value.trim() === '' && skip) {
             event.preventDefault();
             skip.requestSubmit();
+            return;
+        }
+        if (fastEntryEnabled()) {
+            event.preventDefault();
+            submitFast(form);
         }
     });
+    if (skip) {
+        skip.addEventListener('submit', event => {
+            if (!fastEntryEnabled()) return;
+            event.preventDefault();
+            submitFast(skip);
+        });
+    }
+    input.addEventListener('focus', focusEntry);
+    input.addEventListener('blur', () => {
+        window.setTimeout(() => {
+            if (!busy && document.activeElement !== input) {
+                document.body.classList.remove('entry-focused');
+            }
+        }, 180);
+    });
+    if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', updateViewport);
+        window.visualViewport.addEventListener('scroll', updateViewport);
+    }
+    mobile.addEventListener('change', () => {
+        if (!mobile.matches) {
+            document.body.classList.remove('entry-focused');
+            document.documentElement.style.removeProperty('--visual-height');
+        }
+    });
+
+    const pageNotice = document.querySelector('#page-notice:not(.error)');
+    if (pageNotice && mobile.matches) {
+        window.setTimeout(() => pageNotice.hidden = true, 1400);
+    }
+
     input.focus();
     input.select();
+    updateViewport();
 
     <?php if (!$editing):
         $next = nextRowAfter($db, (int) $row['id']);
@@ -1243,10 +1557,16 @@ function handleRequest(): never
             }
             if ($action === 'save') {
                 $status = saveLabel($config);
+                if (wantsJson()) {
+                    jsonResponse(verifierSnapshot($config, $status));
+                }
                 redirect('./?status=' . $status);
             }
             if ($action === 'skip') {
                 skipRow($config);
+                if (wantsJson()) {
+                    jsonResponse(verifierSnapshot($config, 'skipped'));
+                }
                 redirect('./?status=skipped');
             }
             if ($action === 'sync') {
@@ -1265,7 +1585,7 @@ function handleRequest(): never
         }
         renderVerifier($config);
     } catch (AppError $error) {
-        if ($action === 'initialize') {
+        if ($action === 'initialize' || wantsJson()) {
             jsonResponse(['error' => $error->getMessage()], $error->status);
         }
         if ($action === 'image') {
@@ -1289,7 +1609,7 @@ function handleRequest(): never
         renderSetup($config, $error->getMessage());
     } catch (Throwable $error) {
         error_log((string) $error);
-        if ($action === 'initialize') {
+        if ($action === 'initialize' || wantsJson()) {
             jsonResponse(['error' => 'Unexpected initialization error. Check the PHP error log.'], 500);
         }
         http_response_code(500);

@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import csv
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -275,9 +276,15 @@ class ToolTests(unittest.TestCase):
                 with urllib.request.urlopen(request, timeout=10) as response:
                     return response.status, response.read(), dict(response.headers)
 
-            def post(values: dict[str, str]) -> tuple[int, bytes, dict[str, str]]:
+            def post(
+                values: dict[str, str],
+                *,
+                accept_json: bool = False,
+            ) -> tuple[int, bytes, dict[str, str]]:
                 body = urllib.parse.urlencode(values).encode()
                 request = urllib.request.Request(base_url, data=body, method="POST")
+                if accept_json:
+                    request.add_header("Accept", "application/json")
                 with urllib.request.urlopen(request, timeout=20) as response:
                     return response.status, response.read(), dict(response.headers)
 
@@ -301,6 +308,22 @@ class ToolTests(unittest.TestCase):
                 self.assertIn(b'OCR verifier', page)
                 self.assertRegex(page, rb'name="row_id" value="1"')
                 self.assertRegex(page, rb'name="revision" value="0"')
+                self.assertIn(b'enterkeyhint="go"', page)
+                self.assertIn(b'id="mobile-counts"', page)
+                node = shutil.which("node")
+                if node is not None:
+                    scripts = re.findall(rb"<script>(.*?)</script>", page, re.DOTALL)
+                    fast_entry_script = next(
+                        script for script in scripts if b"submitFast" in script
+                    )
+                    script_path = root / "fast-entry.js"
+                    script_path.write_bytes(fast_entry_script)
+                    syntax = subprocess.run(
+                        [node, "--check", str(script_path)],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
                 status, image_body, headers = get("?action=image&id=1")
                 self.assertEqual(status, 200)
@@ -321,16 +344,26 @@ class ToolTests(unittest.TestCase):
                 self.assertIn(b"Enter digits only", invalid.exception.read())
                 invalid.exception.close()
 
-                _, page, _ = post(
+                status, payload, headers = post(
                     {
                         "action": "save",
                         "row_id": "1",
                         "revision": "0",
                         "mode": "queue",
                         "label": "۱۲۳۴",
-                    }
+                    },
+                    accept_json=True,
                 )
-                self.assertIn(b"Label saved", page)
+                self.assertEqual(status, 200)
+                self.assertTrue(headers["Content-Type"].startswith("application/json"))
+                saved_payload = json.loads(payload)
+                self.assertEqual(saved_payload["status"], "saved")
+                self.assertEqual(saved_payload["revision"], 1)
+                self.assertEqual(saved_payload["row"]["id"], 2)
+                self.assertEqual(saved_payload["stats"]["verified"], 2)
+                self.assertEqual(saved_payload["stats"]["pending"], 1)
+
+                _, page, _ = get()
                 self.assertRegex(page, rb'name="row_id" value="2"')
                 self.assertRegex(page, rb'name="revision" value="1"')
 
@@ -353,14 +386,21 @@ class ToolTests(unittest.TestCase):
                 self.assertEqual(escaped_image.exception.code, 404)
                 escaped_image.exception.close()
 
-                _, page, _ = post(
+                status, payload, _ = post(
                     {
                         "action": "skip",
                         "row_id": "2",
                         "revision": "1",
-                    }
+                    },
+                    accept_json=True,
                 )
-                self.assertIn(b"Image skipped", page)
+                self.assertEqual(status, 200)
+                skipped_payload = json.loads(payload)
+                self.assertEqual(skipped_payload["status"], "skipped")
+                self.assertEqual(skipped_payload["revision"], 2)
+                self.assertEqual(skipped_payload["row"]["id"], 2)
+
+                _, page, _ = get()
                 self.assertRegex(page, rb'name="row_id" value="2"')
 
                 _, edit_page, _ = get("?edit=1")

@@ -123,6 +123,11 @@ Arabic digits are accepted and normalized to ASCII. Enter saves and advances;
 an empty Enter or **Skip for now** leaves the row unverified and advances. Recent
 labels can be opened and corrected without moving the main queue.
 
+On phones, focusing the number field switches to a compact entry layout that
+keeps the captcha, input, and Next button above the software keyboard. Save and
+skip requests update the next image in place, so the page does not reload and
+the numeric keyboard stays open between labels.
+
 The page deliberately does not rewrite the large CSV after every answer. The
 header shows how many rows have not yet been copied back. Click **Sync
 labels.csv** before training, copying the dataset, or using another Python tool.
