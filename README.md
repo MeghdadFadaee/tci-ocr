@@ -119,9 +119,9 @@ Open `http://127.0.0.1:8080`, enter the number, and press Enter. ASCII, Persian,
 and Arabic digits are accepted and normalized to ASCII. The next challenge is
 loaded without a page refresh so the numeric keyboard stays open on phones.
 
-By default the collector connects to `https://panel.mvphub.ir` with the panel's
-demo credentials (`username` / `password`) and appends to `dataset/labels.csv`.
-Set real credentials through the process environment:
+By default the collector connects to the TCI customer panel at
+`https://internet.tci.ir/panel/` and appends to `dataset/labels.csv`. Set your
+TCI credentials through the process environment:
 
 ```bash
 PANEL_LOGIN_USERNAME='your-user' \
@@ -131,7 +131,7 @@ php -S 127.0.0.1:8080 -t web
 
 The supported settings are:
 
-- `PANEL_BASE_URL` — panel origin; defaults to `https://panel.mvphub.ir`.
+- `PANEL_BASE_URL` — panel origin; defaults to `https://internet.tci.ir`.
 - `PANEL_LOGIN_USERNAME` — login username; defaults to `username`.
 - `PANEL_LOGIN_PASSWORD` — plaintext login password; defaults to `password`.
 - `PANEL_REQUEST_TIMEOUT` — upstream timeout in seconds; defaults to `10`.
@@ -164,7 +164,7 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root/index.php;
         fastcgi_param OCR_DATASET_DIR /srv/tci-ocr/dataset;
-        fastcgi_param PANEL_BASE_URL https://panel.mvphub.ir;
+        fastcgi_param PANEL_BASE_URL https://internet.tci.ir;
         fastcgi_param PANEL_LOGIN_USERNAME your-user;
         fastcgi_param PANEL_LOGIN_PASSWORD your-password;
         fastcgi_pass unix:/run/php/php8.3-fpm.sock;

@@ -253,34 +253,62 @@ class ToolTests(unittest.TestCase):
                 cookie = self.headers.get("Cookie", "")
                 for part in cookie.split(";"):
                     name, separator, value = part.strip().partition("=")
-                    if separator and name == "CUSTOMER_PORTAL_SESSION":
+                    if separator and name == "PHPSESSID":
                         return value
                 return ""
 
+            def render_login(self, session_id: str) -> bytes:
+                type(self).sequence += 1
+                nonce = type(self).sequence
+                session = type(self).sessions[session_id]
+                message = session.pop("message", "")
+                notification = (
+                    "<script>UIkit.notification("
+                    f"{json.dumps(message, ensure_ascii=False)}"
+                    ");</script>"
+                    if message
+                    else ""
+                )
+                host = self.headers["Host"]
+                return (
+                    f"{notification}"
+                    f'<form action="http://{host}/panel/login/{nonce}" method="POST">'
+                    '<input type="hidden" name="redirect" value="">'
+                    '<input name="username"><input name="password">'
+                    '<img id="loginCaptchaImage" '
+                    f'src="http://{host}/panel/captcha/?r={nonce}">'
+                    '<input name="captcha"><button name="LoginFromWeb"></button>'
+                    "</form>"
+                ).encode()
+
             def do_GET(self):
                 path = urllib.parse.urlsplit(self.path).path
-                if path == "/panel":
-                    type(self).sequence += 1
-                    session_id = f"session-{type(self).sequence}"
-                    csrf = f"{type(self).sequence:064x}"
-                    type(self).sessions[session_id] = {"csrf": csrf}
-                    body = (
-                        '<form><input type="hidden" name="csrf_token" '
-                        f'value="{csrf}"></form>'
-                    ).encode()
+                if path in {"/panel", "/panel/"}:
+                    session_id = self.session_id()
+                    session = type(self).sessions.get(session_id)
+                    headers = None
+                    if session is None:
+                        type(self).sequence += 1
+                        session_id = f"session-{type(self).sequence}"
+                        session = {}
+                        type(self).sessions[session_id] = session
+                        headers = {
+                            "Set-Cookie": (
+                                f"PHPSESSID={session_id}; Path=/; HttpOnly"
+                            )
+                        }
+                    if session.get("authenticated"):
+                        body = '<a href="/panel/logout">خروج</a>'.encode()
+                    else:
+                        body = self.render_login(session_id)
                     self.send_body(
                         200,
                         body,
-                        headers={
-                            "Set-Cookie": (
-                                "CUSTOMER_PORTAL_SESSION="
-                                f"{session_id}; Path=/; HttpOnly; SameSite=Lax"
-                            )
-                        },
+                        headers=headers,
                     )
                     return
 
-                if path == "/captcha":
+                if path == "/panel/captcha/":
                     session = type(self).sessions.get(self.session_id())
                     if session is None:
                         self.send_body(400, b"missing session")
@@ -296,13 +324,19 @@ class ToolTests(unittest.TestCase):
                     session["code"] = code
                     session["image"] = image
                     type(self).latest_code = code
-                    self.send_body(200, image, content_type="image/png")
+                    self.send_body(
+                        200,
+                        image,
+                        content_type="image/png",
+                        headers={"Set-Cookie": "captcha_seen=1; Path=/"},
+                    )
                     return
 
                 self.send_body(404, b"not found")
 
             def do_POST(self):
-                if urllib.parse.urlsplit(self.path).path != "/login":
+                path = urllib.parse.urlsplit(self.path).path
+                if not path.startswith("/panel/login/"):
                     self.send_body(404, b"not found")
                     return
 
@@ -312,13 +346,20 @@ class ToolTests(unittest.TestCase):
                     keep_blank_values=True,
                 )
                 session = type(self).sessions.get(self.session_id())
-                if session is None or values.get("csrf_token", [""])[0] != session["csrf"]:
-                    self.send_body(400, "درخواست ورود معتبر نیست".encode())
+                if (
+                    session is None
+                    or "captcha_seen=1" not in self.headers.get("Cookie", "")
+                    or values.get("redirect") != [""]
+                    or values.get("LoginFromWeb") != ["1"]
+                ):
+                    self.send_body(400, b"invalid login request")
                     return
                 if values.get("captcha", [""])[0] != session.get("code"):
+                    session["message"] = "کد امنیتی وارد شده نادرست است."
                     self.send_body(
-                        401,
-                        "کد امنیتی اشتباه است یا اعتبار آن به پایان رسیده است".encode(),
+                        302,
+                        b"",
+                        headers={"Location": "/panel/"},
                     )
                     return
                 if (
@@ -326,12 +367,15 @@ class ToolTests(unittest.TestCase):
                     or values.get("username", [""])[0] != "username"
                     or values.get("password", [""])[0] != "password"
                 ):
+                    session["message"] = "نام کاربری یا گذرواژه نادرست است."
                     self.send_body(
-                        401,
-                        "نام کاربری یا رمز عبور صحیح نیست".encode(),
+                        302,
+                        b"",
+                        headers={"Location": "/panel/"},
                     )
                     return
-                self.send_body(303, b"", headers={"Location": "/panel"})
+                session["authenticated"] = True
+                self.send_body(302, b"", headers={"Location": "/panel/"})
 
         panel_server = http.server.ThreadingHTTPServer(
             ("127.0.0.1", 0),
@@ -441,14 +485,19 @@ class ToolTests(unittest.TestCase):
                 )
                 self.assertEqual(image_headers["Content-Type"], "image/png")
 
-                _, rejected_body, _ = post(
-                    {
-                        "action": "submit",
-                        "csrf_token": csrf_token,
-                        "challenge_id": first_challenge,
-                        "label": "99999",
-                    }
-                )
+                try:
+                    _, rejected_body, _ = post(
+                        {
+                            "action": "submit",
+                            "csrf_token": csrf_token,
+                            "challenge_id": first_challenge,
+                            "label": "99999",
+                        }
+                    )
+                except urllib.error.HTTPError as problem:
+                    details = problem.read().decode(errors="replace")
+                    problem.close()
+                    self.fail(f"captcha rejection returned {problem.code}: {details}")
                 rejected = json.loads(rejected_body)
                 self.assertEqual(rejected["outcome"], "rejected")
                 self.assertNotEqual(rejected["challenge"]["id"], first_challenge)

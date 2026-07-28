@@ -57,7 +57,7 @@ function collectorConfig(): array
         'panel_base_url' => rtrim(
             $_SERVER['PANEL_BASE_URL']
                 ?? getenv('PANEL_BASE_URL')
-                ?: 'https://panel.mvphub.ir',
+                ?: 'https://internet.tci.ir',
             '/',
         ),
         'panel_username' => (string) (
@@ -168,9 +168,46 @@ function panelUrl(array $config, string $path): string
         || isset($parts['query'])
         || isset($parts['fragment'])
     ) {
-        throw new CollectorError('PANEL_BASE_URL must be a valid HTTP or HTTPS origin.', 500);
+        throw new CollectorError('PANEL_BASE_URL must be a valid HTTP or HTTPS URL.', 500);
     }
-    return $base . '/' . ltrim($path, '/');
+
+    $scheme = strtolower((string) $parts['scheme']);
+    $host = strtolower((string) $parts['host']);
+    $port = isset($parts['port']) ? ':' . (int) $parts['port'] : '';
+    $origin = $scheme . '://' . $parts['host'] . $port;
+
+    if (str_starts_with($path, '//')) {
+        $url = $scheme . ':' . $path;
+    } elseif (preg_match('#^https?://#i', $path) === 1) {
+        $url = $path;
+    } elseif (str_starts_with($path, '/')) {
+        $url = $origin . $path;
+    } else {
+        $basePath = (string) ($parts['path'] ?? '');
+        $directory = $basePath === '' || $basePath === '/'
+            ? '/panel/'
+            : rtrim($basePath, '/') . '/';
+        $url = $origin . $directory . $path;
+    }
+
+    $target = parse_url($url);
+    if ($target === false) {
+        throw new CollectorError('The panel returned an unsafe URL.', 502);
+    }
+    $targetPort = isset($target['port']) ? ':' . (int) $target['port'] : '';
+    if (
+        !isset($target['scheme'], $target['host'])
+        || strtolower((string) $target['scheme']) !== $scheme
+        || strtolower((string) $target['host']) !== $host
+        || $targetPort !== $port
+        || isset($target['user'])
+        || isset($target['pass'])
+        || isset($target['fragment'])
+    ) {
+        throw new CollectorError('The panel returned an unsafe URL.', 502);
+    }
+
+    return $url;
 }
 
 /**
@@ -263,9 +300,33 @@ function panelRequest(
     return new PanelResponse($status, $parsedHeaders, $responseBody);
 }
 
-function extractPanelCookies(PanelResponse $response): string
+/** @return array<string, string> */
+function panelCookieMap(string $cookieHeader): array
 {
     $cookies = [];
+    foreach (explode(';', $cookieHeader) as $pair) {
+        $separator = strpos($pair, '=');
+        if ($separator === false) {
+            continue;
+        }
+        $name = trim(substr($pair, 0, $separator));
+        $value = trim(substr($pair, $separator + 1));
+        if (
+            preg_match('/^[A-Za-z0-9_.-]+$/D', $name) === 1
+            && preg_match('/[\x00-\x20\x7f;]/', $value) !== 1
+        ) {
+            $cookies[$name] = $value;
+        }
+    }
+    return $cookies;
+}
+
+function mergePanelCookies(
+    string $cookieHeader,
+    PanelResponse $response,
+    bool $required = false,
+): string {
+    $cookies = panelCookieMap($cookieHeader);
     foreach ($response->headers('set-cookie') as $header) {
         $pair = trim(explode(';', $header, 2)[0]);
         $separator = strpos($pair, '=');
@@ -282,7 +343,7 @@ function extractPanelCookies(PanelResponse $response): string
         }
         $cookies[$name] = $value;
     }
-    if ($cookies === []) {
+    if ($required && $cookies === []) {
         throw new CollectorError('The panel did not create a login session.', 502);
     }
 
@@ -293,22 +354,44 @@ function extractPanelCookies(PanelResponse $response): string
     return implode('; ', $parts);
 }
 
-function extractPanelCsrf(string $html): string
+function extractPanelFormAction(string $html): string
 {
     $patterns = [
-        '/<input\b[^>]*\bname=(["\'])csrf_token\1[^>]*\bvalue=(["\'])(.*?)\2[^>]*>/is',
-        '/<input\b[^>]*\bvalue=(["\'])(.*?)\1[^>]*\bname=(["\'])csrf_token\3[^>]*>/is',
+        '/<form\b[^>]*\baction\s*=\s*(["\'])(.*?)\1/is',
+        '/<form\b[^>]*\baction\s*=\s*([^\s>"\']+)/is',
     ];
-    foreach ($patterns as $index => $pattern) {
+    foreach ($patterns as $pattern) {
         if (preg_match($pattern, $html, $matches) === 1) {
-            $value = $index === 0 ? $matches[3] : $matches[2];
-            $token = html_entity_decode($value, ENT_QUOTES | ENT_HTML5, 'UTF-8');
-            if (preg_match('/^[a-f0-9]{64}$/D', $token) === 1) {
-                return $token;
+            $value = html_entity_decode(
+                $matches[count($matches) - 1],
+                ENT_QUOTES | ENT_HTML5,
+                'UTF-8',
+            );
+            if ($value !== '') {
+                return $value;
             }
         }
     }
-    throw new CollectorError('Could not find the panel login token.', 502);
+    throw new CollectorError('Could not find the panel login form action.', 502);
+}
+
+function extractPanelCaptchaUrl(string $html): string
+{
+    if (
+        preg_match(
+            '/<img\b(?=[^>]*\bid\s*=\s*(["\'])loginCaptchaImage\1)[^>]*\bsrc\s*=\s*(["\'])(.*?)\2/is',
+            $html,
+            $matches,
+        ) !== 1
+    ) {
+        throw new CollectorError('Could not find the panel captcha image.', 502);
+    }
+
+    $url = html_entity_decode($matches[3], ENT_QUOTES | ENT_HTML5, 'UTF-8');
+    if ($url === '') {
+        throw new CollectorError('The panel returned an empty captcha URL.', 502);
+    }
+    return $url;
 }
 
 function imageType(string $bytes, ?string $contentType): array
@@ -335,28 +418,30 @@ function imageType(string $bytes, ?string $contentType): array
 
 function fetchPanelChallenge(array $config): array
 {
-    $login = panelRequest($config, 'GET', '/panel');
+    $login = panelRequest($config, 'GET', '/panel/');
     if ($login->status !== 200) {
         throw new CollectorError('The panel login page is unavailable.', 502);
     }
-    $cookie = extractPanelCookies($login);
-    $upstreamCsrf = extractPanelCsrf($login->body);
+    $cookie = mergePanelCookies('', $login, true);
+    $loginUrl = panelUrl($config, extractPanelFormAction($login->body));
+    $captchaUrl = panelUrl($config, extractPanelCaptchaUrl($login->body));
 
     $captcha = panelRequest(
         $config,
         'GET',
-        '/captcha?nonce=' . rawurlencode(bin2hex(random_bytes(8))),
+        $captchaUrl,
         ['Cookie: ' . $cookie],
     );
     if ($captcha->status !== 200 || $captcha->body === '') {
         throw new CollectorError('The panel captcha is unavailable.', 502);
     }
+    $cookie = mergePanelCookies($cookie, $captcha);
     $type = imageType($captcha->body, $captcha->header('content-type'));
 
     return [
         'id' => bin2hex(random_bytes(16)),
         'cookie' => $cookie,
-        'upstream_csrf' => $upstreamCsrf,
+        'login_url' => $loginUrl,
         'image' => $captcha->body,
         'mime' => $type['mime'],
         'extension' => $type['extension'],
@@ -370,7 +455,7 @@ function challengeIsUsable(mixed $challenge): bool
         && isset(
             $challenge['id'],
             $challenge['cookie'],
-            $challenge['upstream_csrf'],
+            $challenge['login_url'],
             $challenge['image'],
             $challenge['mime'],
             $challenge['extension'],
@@ -378,7 +463,7 @@ function challengeIsUsable(mixed $challenge): bool
         )
         && is_string($challenge['id'])
         && is_string($challenge['cookie'])
-        && is_string($challenge['upstream_csrf'])
+        && is_string($challenge['login_url'])
         && is_string($challenge['image'])
         && is_string($challenge['mime'])
         && is_string($challenge['extension'])
@@ -449,13 +534,14 @@ function validatePendingChallenge(array $config, string $challengeId, string $an
         'username' => $config['panel_username'],
         'password' => $config['panel_password'],
         'captcha' => $answer,
-        'csrf_token' => $challenge['upstream_csrf'],
+        'redirect' => '',
+        'LoginFromWeb' => '1',
     ], '', '&', PHP_QUERY_RFC3986);
 
     $response = panelRequest(
         $config,
         'POST',
-        '/login',
+        $challenge['login_url'],
         [
             'Content-Type: application/x-www-form-urlencoded',
             'Content-Length: ' . strlen($body),
@@ -465,21 +551,47 @@ function validatePendingChallenge(array $config, string $challengeId, string $an
     );
 
     $location = $response->header('location');
-    $locationPath = $location === null ? null : parse_url($location, PHP_URL_PATH);
-    if ($response->status === 303 && $locationPath === '/panel') {
+    if (
+        !in_array($response->status, [301, 302, 303, 307, 308], true)
+        || $location === null
+    ) {
+        throw new CollectorError(
+            'The panel returned an unexpected login response; nothing was saved.',
+            502,
+        );
+    }
+
+    $cookie = mergePanelCookies($challenge['cookie'], $response);
+    $result = panelRequest(
+        $config,
+        'GET',
+        panelUrl($config, $location),
+        ['Cookie: ' . $cookie],
+    );
+    if ($result->status !== 200) {
+        throw new CollectorError(
+            'The panel login result page is unavailable; nothing was saved.',
+            502,
+        );
+    }
+
+    if (
+        stripos($result->body, 'logout') !== false
+        || str_contains($result->body, 'خروج')
+    ) {
         return storeValidatedSample($config, $challenge, $answer);
     }
 
     if (
-        $response->status === 401
-        && str_contains($response->body, 'کد امنیتی اشتباه است یا اعتبار آن به پایان رسیده است')
+        str_contains($result->body, 'کد امنیتی وارد شده نادرست است')
+        || str_contains($result->body, 'کد امنیتی منقضی شده است')
     ) {
         return ['stored' => false, 'rejected' => true];
     }
 
     if (
-        $response->status === 401
-        && str_contains($response->body, 'نام کاربری یا رمز عبور صحیح نیست')
+        str_contains($result->body, 'loginCaptchaImage')
+        || preg_match('/<input\b[^>]*\bname\s*=\s*(["\'])password\1/is', $result->body) === 1
     ) {
         throw new CollectorError(
             'The panel rejected the configured username or password.',
