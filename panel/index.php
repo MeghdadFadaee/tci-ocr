@@ -2,6 +2,10 @@
 
 declare(strict_types=1);
 
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+error_reporting(E_ALL);
+
 const DEFAULT_TRAFFIC_GB = '12.5';
 const DEFAULT_PLAN_NAME = 'سرویس طلایی';
 
@@ -249,12 +253,8 @@ SVG;
         imagesx($scaledTextLayer),
         imagesy($scaledTextLayer)
     );
-    imagedestroy($textLayer);
-    imagedestroy($scaledTextLayer);
-
     header('Content-Type: image/jpeg');
     imagejpeg($image, null, 92);
-    imagedestroy($image);
     exit;
 }
 
