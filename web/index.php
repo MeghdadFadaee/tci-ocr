@@ -17,11 +17,12 @@ session_start();
 
 sendSecurityHeaders();
 
-$config = collectorConfig();
 $method = strtoupper((string) ($_SERVER['REQUEST_METHOD'] ?? 'GET'));
 $action = scalarRequestValue('action', 32) ?? '';
 
 try {
+    $config = collectorConfig();
+
     if ($method === 'GET' && $action === 'captcha') {
         servePendingCaptcha();
     }

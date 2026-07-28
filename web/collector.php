@@ -41,12 +41,159 @@ final class PanelResponse
     }
 }
 
-function collectorConfig(): array
+/**
+ * @return array<string, string>
+ */
+function readProjectEnvironment(string $path): array
 {
-    $configuredDataset = $_SERVER['OCR_DATASET_DIR'] ?? getenv('OCR_DATASET_DIR') ?: '';
-    $timeoutValue = $_SERVER['PANEL_REQUEST_TIMEOUT']
-        ?? getenv('PANEL_REQUEST_TIMEOUT')
-        ?: '10';
+    if (!file_exists($path)) {
+        return [];
+    }
+    if (!is_file($path) || !is_readable($path)) {
+        throw new CollectorError('The project .env file is not readable.', 500);
+    }
+
+    $contents = @file_get_contents($path);
+    if ($contents === false) {
+        throw new CollectorError('Could not read the project .env file.', 500);
+    }
+    if (strlen($contents) > 65_536) {
+        throw new CollectorError('The project .env file is unexpectedly large.', 500);
+    }
+
+    $supported = array_fill_keys([
+        'PANEL_BASE_URL',
+        'PANEL_LOGIN_USERNAME',
+        'PANEL_LOGIN_PASSWORD',
+        'PANEL_REQUEST_TIMEOUT',
+        'OCR_DATASET_DIR',
+    ], true);
+    $values = [];
+    $lines = preg_split('/\R/', $contents);
+    if ($lines === false) {
+        throw new CollectorError('Could not parse the project .env file.', 500);
+    }
+
+    foreach ($lines as $index => $line) {
+        if ($index === 0) {
+            $line = preg_replace('/^\xEF\xBB\xBF/', '', $line) ?? $line;
+        }
+        $trimmed = trim($line);
+        if ($trimmed === '' || str_starts_with($trimmed, '#')) {
+            continue;
+        }
+        if (
+            preg_match(
+                '/^(?:export\s+)?([A-Z][A-Z0-9_]*)\s*=\s*(.*)$/D',
+                $trimmed,
+                $matches,
+            ) !== 1
+        ) {
+            throw new CollectorError(
+                'Invalid project .env syntax on line ' . ($index + 1) . '.',
+                500,
+            );
+        }
+
+        $name = $matches[1];
+        if (!isset($supported[$name])) {
+            continue;
+        }
+        $values[$name] = parseProjectEnvironmentValue(
+            $matches[2],
+            $index + 1,
+        );
+    }
+
+    return $values;
+}
+
+function parseProjectEnvironmentValue(string $raw, int $line): string
+{
+    $raw = ltrim($raw);
+    if ($raw === '') {
+        return '';
+    }
+
+    $quote = $raw[0];
+    if ($quote !== '"' && $quote !== "'") {
+        return trim(preg_replace('/\s+#.*$/', '', $raw) ?? $raw);
+    }
+
+    $value = '';
+    $escaped = false;
+    $length = strlen($raw);
+    for ($index = 1; $index < $length; $index++) {
+        $character = $raw[$index];
+        if ($quote === '"' && $escaped) {
+            $value .= match ($character) {
+                'n' => "\n",
+                'r' => "\r",
+                't' => "\t",
+                '"', '\\', '$' => $character,
+                default => '\\' . $character,
+            };
+            $escaped = false;
+            continue;
+        }
+        if ($quote === '"' && $character === '\\') {
+            $escaped = true;
+            continue;
+        }
+        if ($character !== $quote) {
+            $value .= $character;
+            continue;
+        }
+
+        $remainder = trim(substr($raw, $index + 1));
+        if ($remainder !== '' && !str_starts_with($remainder, '#')) {
+            throw new CollectorError(
+                "Invalid project .env value on line {$line}.",
+                500,
+            );
+        }
+        return $value;
+    }
+
+    throw new CollectorError(
+        "Unclosed quote in project .env on line {$line}.",
+        500,
+    );
+}
+
+function collectorSetting(
+    string $name,
+    array $projectEnvironment,
+    string $default = '',
+): string {
+    $serverValue = $_SERVER[$name] ?? null;
+    if (is_string($serverValue) && $serverValue !== '') {
+        return $serverValue;
+    }
+
+    $processValue = getenv($name);
+    if ($processValue !== false && $processValue !== '') {
+        return $processValue;
+    }
+
+    $projectValue = $projectEnvironment[$name] ?? '';
+    return $projectValue !== '' ? $projectValue : $default;
+}
+
+function collectorConfig(?string $projectEnvPath = null): array
+{
+    $projectEnvironment = readProjectEnvironment(
+        $projectEnvPath ?? dirname(__DIR__) . '/.env',
+    );
+    $configuredDataset = collectorSetting(
+        'OCR_DATASET_DIR',
+        $projectEnvironment,
+    );
+    $timeoutValue = collectorSetting(
+        'PANEL_REQUEST_TIMEOUT',
+        $projectEnvironment,
+        '10',
+    );
     $timeout = filter_var($timeoutValue, FILTER_VALIDATE_INT);
 
     return [
@@ -55,20 +202,22 @@ function collectorConfig(): array
             DIRECTORY_SEPARATOR,
         ),
         'panel_base_url' => rtrim(
-            $_SERVER['PANEL_BASE_URL']
-                ?? getenv('PANEL_BASE_URL')
-                ?: 'https://internet.tci.ir',
+            collectorSetting(
+                'PANEL_BASE_URL',
+                $projectEnvironment,
+                'https://internet.tci.ir',
+            ),
             '/',
         ),
-        'panel_username' => (string) (
-            $_SERVER['PANEL_LOGIN_USERNAME']
-                ?? getenv('PANEL_LOGIN_USERNAME')
-                ?: 'username'
+        'panel_username' => collectorSetting(
+            'PANEL_LOGIN_USERNAME',
+            $projectEnvironment,
+            'username',
         ),
-        'panel_password' => (string) (
-            $_SERVER['PANEL_LOGIN_PASSWORD']
-                ?? getenv('PANEL_LOGIN_PASSWORD')
-                ?: 'password'
+        'panel_password' => collectorSetting(
+            'PANEL_LOGIN_PASSWORD',
+            $projectEnvironment,
+            'password',
         ),
         'timeout' => $timeout === false ? 10 : max(1, min(60, $timeout)),
     ];

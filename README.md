@@ -120,14 +120,17 @@ and Arabic digits are accepted and normalized to ASCII. The next challenge is
 loaded without a page refresh so the numeric keyboard stays open on phones.
 
 By default the collector connects to the TCI customer panel at
-`https://internet.tci.ir/panel/` and appends to `dataset/labels.csv`. Set your
-TCI credentials through the process environment:
+`https://internet.tci.ir/panel/` and appends to `dataset/labels.csv`. Create a
+project-level `.env` file for your TCI credentials:
 
 ```bash
-PANEL_LOGIN_USERNAME='your-user' \
-PANEL_LOGIN_PASSWORD='your-password' \
-php -S 127.0.0.1:8080 -t web
+cp .env.example .env
 ```
+
+Edit `.env` and replace `your-tci-username` and `your-tci-password`. Quoted
+values may contain spaces, `#`, or `$`. The `.env` file is ignored by Git.
+Existing PHP-FPM, Nginx FastCGI, or process environment settings take precedence
+over values in `.env`.
 
 The supported settings are:
 
@@ -144,8 +147,18 @@ If the dataset directory or CSV has been removed, it is recreated automatically.
 Legacy `verification.sqlite` files are ignored.
 
 Keep the collector private: it has no user authentication and holds the panel
-credentials in the PHP process environment. The PHP user needs write permission
-for the dataset directory. Do not expose `dataset/` as a public web directory.
+credentials. The PHP user needs read permission for `.env` and write permission
+for the dataset directory. On a typical Debian/Ubuntu PHP-FPM server, protect the
+file with:
+
+```bash
+sudo chown root:www-data .env
+sudo chmod 640 .env
+```
+
+Use your PHP-FPM worker group instead of `www-data` when it differs. Keep the
+Nginx document root set to the repository's `web/` directory so `.env` and
+`dataset/` cannot be downloaded.
 
 ### Minimal Nginx configuration
 
@@ -164,9 +177,6 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root/index.php;
         fastcgi_param OCR_DATASET_DIR /srv/tci-ocr/dataset;
-        fastcgi_param PANEL_BASE_URL https://internet.tci.ir;
-        fastcgi_param PANEL_LOGIN_USERNAME your-user;
-        fastcgi_param PANEL_LOGIN_PASSWORD your-password;
         fastcgi_pass unix:/run/php/php8.3-fpm.sock;
     }
 
@@ -175,6 +185,3 @@ server {
     }
 }
 ```
-
-Prefer protected PHP-FPM environment configuration for real secrets instead of
-putting them directly in a shared Nginx configuration.

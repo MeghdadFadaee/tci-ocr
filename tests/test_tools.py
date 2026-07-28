@@ -218,6 +218,58 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(original_one.is_file())
             self.assertTrue(original_two.is_file())
 
+    def test_php_collector_loads_project_env_with_server_precedence(self):
+        php = shutil.which("php")
+        if php is None:
+            self.skipTest("PHP is not installed")
+
+        with tempfile.TemporaryDirectory() as temp:
+            env_path = Path(temp) / ".env"
+            env_path.write_text(
+                "\n".join(
+                    [
+                        '# Collector settings',
+                        'PANEL_LOGIN_USERNAME="project user"',
+                        'PANEL_LOGIN_PASSWORD="p@ss # $word"',
+                        'PANEL_BASE_URL="https://example.test/panel/"',
+                        'PANEL_REQUEST_TIMEOUT=17 # seconds',
+                        'OCR_DATASET_DIR="/srv/tci dataset"',
+                        'UNRELATED_SETTING="ignored"',
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            environment = os.environ.copy()
+            for name in (
+                "PANEL_LOGIN_PASSWORD",
+                "PANEL_BASE_URL",
+                "PANEL_REQUEST_TIMEOUT",
+                "OCR_DATASET_DIR",
+            ):
+                environment.pop(name, None)
+            environment["PANEL_LOGIN_USERNAME"] = "server-user"
+            script = (
+                f"require {json.dumps(str(PROJECT / 'web' / 'collector.php'))};"
+                "$config = collectorConfig($argv[1]);"
+                "echo json_encode($config, JSON_THROW_ON_ERROR);"
+            )
+            result = subprocess.run(
+                [php, "-r", script, str(env_path)],
+                text=True,
+                capture_output=True,
+                env=environment,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            config = json.loads(result.stdout)
+            self.assertEqual(config["panel_username"], "server-user")
+            self.assertEqual(config["panel_password"], "p@ss # $word")
+            self.assertEqual(
+                config["panel_base_url"],
+                "https://example.test/panel",
+            )
+            self.assertEqual(config["timeout"], 17)
+            self.assertEqual(config["dataset"], "/srv/tci dataset")
+
     def test_php_panel_collector_validates_and_appends_samples(self):
         php = shutil.which("php")
         if php is None:
