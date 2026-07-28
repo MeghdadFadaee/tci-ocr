@@ -1,17 +1,18 @@
 from __future__ import annotations
 
-import base64
 import csv
 import hashlib
+import http.cookiejar
+import http.server
 import json
 import os
 import re
 import shutil
 import socket
-import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import urllib.error
@@ -22,6 +23,7 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 PNG = b"\x89PNG\r\n\x1a\n" + b"test-image-payload"
+CSV_COLUMNS = ["filename", "label", "batch_id", "verified", "hash"]
 
 
 class ToolTests(unittest.TestCase):
@@ -38,10 +40,7 @@ class ToolTests(unittest.TestCase):
         image.write_bytes(PNG)
         csv_path = root / "labels.csv"
         with csv_path.open("w", newline="", encoding="utf-8") as output:
-            writer = csv.DictWriter(
-                output,
-                fieldnames=["filename", "label", "batch_id", "verified", "hash"],
-            )
+            writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
             writer.writeheader()
             writer.writerow(
                 {
@@ -64,11 +63,16 @@ class ToolTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(PROJECT / "download_dataset.py"),
-                    "--url", url,
-                    "--output", str(dataset),
-                    "--count", "3",
-                    "--workers", "2",
-                    "--flush-every", "1",
+                    "--url",
+                    url,
+                    "--output",
+                    str(dataset),
+                    "--count",
+                    "3",
+                    "--workers",
+                    "2",
+                    "--flush-every",
+                    "1",
                 ],
                 text=True,
                 capture_output=True,
@@ -78,20 +82,24 @@ class ToolTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(PROJECT / "download_dataset.py"),
-                    "--url", url,
-                    "--output", str(dataset),
-                    "--count", "5",
-                    "--workers", "2",
+                    "--url",
+                    url,
+                    "--output",
+                    str(dataset),
+                    "--count",
+                    "5",
+                    "--workers",
+                    "2",
                 ],
                 text=True,
                 capture_output=True,
             )
             self.assertEqual(second.returncode, 0, second.stderr)
 
-            with (dataset / "labels.csv").open(newline="", encoding="utf-8") as f:
-                rows = list(csv.DictReader(f))
+            with (dataset / "labels.csv").open(newline="", encoding="utf-8") as source:
+                rows = list(csv.DictReader(source))
             self.assertEqual(len(rows), 5)
-            self.assertEqual(list(rows[0]), ["filename", "label", "batch_id", "verified", "hash"])
+            self.assertEqual(list(rows[0]), CSV_COLUMNS)
             self.assertEqual(rows[0]["hash"], hashlib.sha256(PNG).hexdigest())
             self.assertTrue(all((dataset / row["filename"]).is_file() for row in rows))
 
@@ -100,15 +108,17 @@ class ToolTests(unittest.TestCase):
                 [
                     sys.executable,
                     str(PROJECT / "find_duplicates.py"),
-                    "--csv", str(dataset / "labels.csv"),
-                    "--output", str(report),
+                    "--csv",
+                    str(dataset / "labels.csv"),
+                    "--output",
+                    str(report),
                 ],
                 text=True,
                 capture_output=True,
             )
             self.assertEqual(result.returncode, 0, result.stderr)
-            with report.open(newline="", encoding="utf-8") as f:
-                duplicates = list(csv.DictReader(f))
+            with report.open(newline="", encoding="utf-8") as source:
+                duplicates = list(csv.DictReader(source))
             self.assertEqual(len(duplicates), 4)
 
     def test_verifier_normalizes_persian_digits_and_saves_on_quit(self):
@@ -119,10 +129,7 @@ class ToolTests(unittest.TestCase):
             image.write_bytes(PNG)
             csv_path = root / "labels.csv"
             with csv_path.open("w", newline="", encoding="utf-8") as output:
-                writer = csv.DictWriter(
-                    output,
-                    fieldnames=["filename", "label", "batch_id", "verified", "hash"],
-                )
+                writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS)
                 writer.writeheader()
                 for suffix in ("0", "1"):
                     writer.writerow(
@@ -131,7 +138,9 @@ class ToolTests(unittest.TestCase):
                             "label": "",
                             "batch_id": "0",
                             "verified": "0",
-                            "hash": hashlib.sha256(PNG + suffix.encode()).hexdigest(),
+                            "hash": hashlib.sha256(
+                                PNG + suffix.encode()
+                            ).hexdigest(),
                         }
                     )
 
@@ -141,12 +150,15 @@ class ToolTests(unittest.TestCase):
             fake_kitten.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
             fake_kitten.chmod(0o755)
             environment = os.environ.copy()
-            environment["PATH"] = f"{binary_dir}{os.pathsep}{environment.get('PATH', '')}"
+            environment["PATH"] = (
+                f"{binary_dir}{os.pathsep}{environment.get('PATH', '')}"
+            )
             result = subprocess.run(
                 [
                     sys.executable,
                     str(PROJECT / "verify_labels.py"),
-                    "--csv", str(csv_path),
+                    "--csv",
+                    str(csv_path),
                 ],
                 input="۱۲۳\nq\n",
                 text=True,
@@ -180,8 +192,10 @@ class ToolTests(unittest.TestCase):
                     str(PROJECT / "merge_datasets.py"),
                     str(source_one),
                     str(source_two / "labels.csv"),
-                    "--output", str(destination),
-                    "--batch-size", "1",
+                    "--output",
+                    str(destination),
+                    "--batch-size",
+                    "1",
                 ],
                 text=True,
                 capture_output=True,
@@ -204,63 +218,165 @@ class ToolTests(unittest.TestCase):
             self.assertTrue(original_one.is_file())
             self.assertTrue(original_two.is_file())
 
-    def test_php_web_verifier_initializes_saves_skips_edits_and_syncs(self):
+    def test_php_panel_collector_validates_and_appends_samples(self):
         php = shutil.which("php")
         if php is None:
             self.skipTest("PHP is not installed")
-        sqlite_support = subprocess.run(
-            [php, "-r", "exit(extension_loaded('pdo_sqlite') ? 0 : 1);"]
+
+        class PanelHandler(http.server.BaseHTTPRequestHandler):
+            sessions: dict[str, dict[str, object]] = {}
+            sequence = 0
+            latest_code = ""
+            reject_credentials = False
+            next_fixture: tuple[str, bytes] | None = None
+
+            def log_message(self, *_args):
+                return
+
+            def send_body(
+                self,
+                status: int,
+                body: bytes,
+                *,
+                content_type: str = "text/html; charset=UTF-8",
+                headers: dict[str, str] | None = None,
+            ) -> None:
+                self.send_response(status)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def session_id(self) -> str:
+                cookie = self.headers.get("Cookie", "")
+                for part in cookie.split(";"):
+                    name, separator, value = part.strip().partition("=")
+                    if separator and name == "CUSTOMER_PORTAL_SESSION":
+                        return value
+                return ""
+
+            def do_GET(self):
+                path = urllib.parse.urlsplit(self.path).path
+                if path == "/panel":
+                    type(self).sequence += 1
+                    session_id = f"session-{type(self).sequence}"
+                    csrf = f"{type(self).sequence:064x}"
+                    type(self).sessions[session_id] = {"csrf": csrf}
+                    body = (
+                        '<form><input type="hidden" name="csrf_token" '
+                        f'value="{csrf}"></form>'
+                    ).encode()
+                    self.send_body(
+                        200,
+                        body,
+                        headers={
+                            "Set-Cookie": (
+                                "CUSTOMER_PORTAL_SESSION="
+                                f"{session_id}; Path=/; HttpOnly; SameSite=Lax"
+                            )
+                        },
+                    )
+                    return
+
+                if path == "/captcha":
+                    session = type(self).sessions.get(self.session_id())
+                    if session is None:
+                        self.send_body(400, b"missing session")
+                        return
+                    type(self).sequence += 1
+                    fixture = type(self).next_fixture
+                    type(self).next_fixture = None
+                    if fixture is None:
+                        code = str(10000 + type(self).sequence)
+                        image = PNG + b"-" + code.encode()
+                    else:
+                        code, image = fixture
+                    session["code"] = code
+                    session["image"] = image
+                    type(self).latest_code = code
+                    self.send_body(200, image, content_type="image/png")
+                    return
+
+                self.send_body(404, b"not found")
+
+            def do_POST(self):
+                if urllib.parse.urlsplit(self.path).path != "/login":
+                    self.send_body(404, b"not found")
+                    return
+
+                length = int(self.headers.get("Content-Length", "0"))
+                values = urllib.parse.parse_qs(
+                    self.rfile.read(length).decode(),
+                    keep_blank_values=True,
+                )
+                session = type(self).sessions.get(self.session_id())
+                if session is None or values.get("csrf_token", [""])[0] != session["csrf"]:
+                    self.send_body(400, "درخواست ورود معتبر نیست".encode())
+                    return
+                if values.get("captcha", [""])[0] != session.get("code"):
+                    self.send_body(
+                        401,
+                        "کد امنیتی اشتباه است یا اعتبار آن به پایان رسیده است".encode(),
+                    )
+                    return
+                if (
+                    type(self).reject_credentials
+                    or values.get("username", [""])[0] != "username"
+                    or values.get("password", [""])[0] != "password"
+                ):
+                    self.send_body(
+                        401,
+                        "نام کاربری یا رمز عبور صحیح نیست".encode(),
+                    )
+                    return
+                self.send_body(303, b"", headers={"Location": "/panel"})
+
+        panel_server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0),
+            PanelHandler,
         )
-        if sqlite_support.returncode != 0:
-            self.skipTest("PHP PDO SQLite is not installed")
+        panel_thread = threading.Thread(
+            target=panel_server.serve_forever,
+            daemon=True,
+        )
+        panel_thread.start()
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             dataset = root / "dataset"
-            image = dataset / "images" / "000000" / "000000000.png"
-            image.parent.mkdir(parents=True)
-            web_png = base64.b64decode(
-                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwC"
-                "AAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+            old_hash = hashlib.sha256(PNG).hexdigest()
+            old_image = self.make_dataset(
+                dataset,
+                label="123",
+                verified="1",
+                digest=old_hash,
             )
-            image.write_bytes(web_png)
-            outside_image = root / "outside.png"
-            outside_image.write_bytes(web_png)
             csv_path = dataset / "labels.csv"
-            with csv_path.open("w", newline="", encoding="utf-8") as output:
-                writer = csv.DictWriter(
-                    output,
-                    fieldnames=["filename", "label", "batch_id", "verified", "hash"],
-                )
-                writer.writeheader()
-                for index, (label, verified) in enumerate(
-                    [("123", "1"), ("", "0"), ("", "0")]
-                ):
-                    writer.writerow(
-                        {
-                            "filename": (
-                                "../outside.png"
-                                if index == 2
-                                else image.relative_to(dataset).as_posix()
-                            ),
-                            "label": label,
-                            "batch_id": "0",
-                            "verified": verified,
-                            "hash": hashlib.sha256(web_png + str(index).encode()).hexdigest(),
-                        }
-                    )
 
             with socket.socket() as listener:
                 listener.bind(("127.0.0.1", 0))
-                port = listener.getsockname()[1]
+                collector_port = listener.getsockname()[1]
 
             environment = os.environ.copy()
+            for name in (
+                "PANEL_LOGIN_USERNAME",
+                "PANEL_LOGIN_PASSWORD",
+                "PANEL_USERNAME",
+                "PANEL_PASSWORD",
+            ):
+                environment.pop(name, None)
             environment["OCR_DATASET_DIR"] = str(dataset)
-            server = subprocess.Popen(
+            environment["PANEL_BASE_URL"] = (
+                f"http://127.0.0.1:{panel_server.server_port}"
+            )
+            environment["PANEL_REQUEST_TIMEOUT"] = "2"
+            collector = subprocess.Popen(
                 [
                     php,
                     "-S",
-                    f"127.0.0.1:{port}",
+                    f"127.0.0.1:{collector_port}",
                     "-t",
                     str(PROJECT / "web"),
                 ],
@@ -269,205 +385,209 @@ class ToolTests(unittest.TestCase):
                 text=True,
                 env=environment,
             )
-            base_url = f"http://127.0.0.1:{port}/"
+            base_url = f"http://127.0.0.1:{collector_port}/"
+            opener = urllib.request.build_opener(
+                urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar())
+            )
 
             def get(path: str = "") -> tuple[int, bytes, dict[str, str]]:
-                request = urllib.request.Request(base_url + path)
-                with urllib.request.urlopen(request, timeout=10) as response:
+                with opener.open(base_url + path, timeout=10) as response:
                     return response.status, response.read(), dict(response.headers)
 
             def post(
                 values: dict[str, str],
-                *,
-                accept_json: bool = False,
             ) -> tuple[int, bytes, dict[str, str]]:
-                body = urllib.parse.urlencode(values).encode()
-                request = urllib.request.Request(base_url, data=body, method="POST")
-                if accept_json:
-                    request.add_header("Accept", "application/json")
-                with urllib.request.urlopen(request, timeout=20) as response:
+                request = urllib.request.Request(
+                    base_url,
+                    data=urllib.parse.urlencode(values).encode(),
+                    method="POST",
+                    headers={"Accept": "application/json"},
+                )
+                with opener.open(request, timeout=15) as response:
                     return response.status, response.read(), dict(response.headers)
 
             try:
-                for _ in range(50):
+                for _ in range(60):
                     try:
-                        status, page, _ = get()
+                        status, page, headers = get()
                         if status == 200:
                             break
                     except urllib.error.URLError:
                         time.sleep(0.05)
                 else:
-                    self.fail("PHP development server did not start")
+                    self.fail("PHP collector server did not start")
 
-                self.assertIn(b"Initialize verifier", page)
-                status, payload, _ = post({"action": "initialize"})
-                self.assertEqual(status, 200)
-                self.assertIn(b'"done":true', payload)
-
-                _, page, _ = get()
-                self.assertIn(b'OCR verifier', page)
-                self.assertRegex(page, rb'name="row_id" value="1"')
-                self.assertRegex(page, rb'name="revision" value="0"')
+                self.assertIn(b"Captcha collector", page)
+                self.assertIn(b'inputmode="numeric"', page)
                 self.assertIn(b'enterkeyhint="go"', page)
-                self.assertIn(b'id="mobile-counts"', page)
-                node = shutil.which("node")
-                if node is not None:
-                    scripts = re.findall(rb"<script>(.*?)</script>", page, re.DOTALL)
-                    fast_entry_script = next(
-                        script for script in scripts if b"submitFast" in script
-                    )
-                    script_path = root / "fast-entry.js"
-                    script_path.write_bytes(fast_entry_script)
-                    syntax = subprocess.run(
-                        [node, "--check", str(script_path)],
-                        text=True,
-                        capture_output=True,
-                    )
-                    self.assertEqual(syntax.returncode, 0, syntax.stderr)
+                self.assertIn("no-store", headers["Cache-Control"])
+                self.assertIn("default-src 'self'", headers["Content-Security-Policy"])
 
-                status, image_body, headers = get("?action=image&id=1")
-                self.assertEqual(status, 200)
-                self.assertEqual(image_body, web_png)
-                self.assertEqual(headers["Content-Type"], "image/png")
-
-                with self.assertRaises(urllib.error.HTTPError) as invalid:
-                    post(
-                        {
-                            "action": "save",
-                            "row_id": "1",
-                            "revision": "0",
-                            "mode": "queue",
-                            "label": "12x",
-                        }
-                    )
-                self.assertEqual(invalid.exception.code, 422)
-                self.assertIn(b"Enter digits only", invalid.exception.read())
-                invalid.exception.close()
-
-                status, payload, headers = post(
-                    {
-                        "action": "save",
-                        "row_id": "1",
-                        "revision": "0",
-                        "mode": "queue",
-                        "label": "۱۲۳۴",
-                    },
-                    accept_json=True,
+                csrf = re.search(
+                    rb'name="csrf_token" value="([a-f0-9]{64})"',
+                    page,
                 )
-                self.assertEqual(status, 200)
-                self.assertTrue(headers["Content-Type"].startswith("application/json"))
-                saved_payload = json.loads(payload)
-                self.assertEqual(saved_payload["status"], "saved")
-                self.assertEqual(saved_payload["revision"], 1)
-                self.assertEqual(saved_payload["row"]["id"], 2)
-                self.assertEqual(saved_payload["stats"]["verified"], 2)
-                self.assertEqual(saved_payload["stats"]["pending"], 1)
+                challenge = re.search(
+                    rb'name="challenge_id" value="([a-f0-9]{32})"',
+                    page,
+                )
+                self.assertIsNotNone(csrf)
+                self.assertIsNotNone(challenge)
+                csrf_token = csrf.group(1).decode()
+                first_challenge = challenge.group(1).decode()
 
-                _, page, _ = get()
-                self.assertRegex(page, rb'name="row_id" value="2"')
-                self.assertRegex(page, rb'name="revision" value="1"')
+                _, first_image, image_headers = get(
+                    f"?action=captcha&id={first_challenge}"
+                )
+                self.assertEqual(image_headers["Content-Type"], "image/png")
+
+                _, rejected_body, _ = post(
+                    {
+                        "action": "submit",
+                        "csrf_token": csrf_token,
+                        "challenge_id": first_challenge,
+                        "label": "99999",
+                    }
+                )
+                rejected = json.loads(rejected_body)
+                self.assertEqual(rejected["outcome"], "rejected")
+                self.assertNotEqual(rejected["challenge"]["id"], first_challenge)
+                with csv_path.open(newline="", encoding="utf-8") as source:
+                    self.assertEqual(len(list(csv.DictReader(source))), 1)
 
                 with self.assertRaises(urllib.error.HTTPError) as stale:
                     post(
                         {
-                            "action": "save",
-                            "row_id": "1",
-                            "revision": "0",
-                            "mode": "queue",
-                            "label": "999",
+                            "action": "submit",
+                            "csrf_token": csrf_token,
+                            "challenge_id": first_challenge,
+                            "label": "99999",
                         }
                     )
                 self.assertEqual(stale.exception.code, 409)
-                self.assertIn(b"stale", stale.exception.read())
                 stale.exception.close()
 
-                with self.assertRaises(urllib.error.HTTPError) as escaped_image:
-                    get("?action=image&id=2")
-                self.assertEqual(escaped_image.exception.code, 404)
-                escaped_image.exception.close()
-
-                status, payload, _ = post(
-                    {
-                        "action": "skip",
-                        "row_id": "2",
-                        "revision": "1",
-                    },
-                    accept_json=True,
+                accepted_challenge = rejected["challenge"]["id"]
+                _, accepted_image, _ = get(
+                    f"?action=captcha&id={accepted_challenge}"
                 )
-                self.assertEqual(status, 200)
-                skipped_payload = json.loads(payload)
-                self.assertEqual(skipped_payload["status"], "skipped")
-                self.assertEqual(skipped_payload["revision"], 2)
-                self.assertEqual(skipped_payload["row"]["id"], 2)
-
-                _, page, _ = get()
-                self.assertRegex(page, rb'name="row_id" value="2"')
-
-                _, edit_page, _ = get("?edit=1")
-                revision = re.search(rb'name="revision" value="(\d+)"', edit_page)
-                self.assertIsNotNone(revision)
-                _, corrected_page, _ = post(
+                ascii_code = PanelHandler.latest_code
+                persian_code = ascii_code.translate(
+                    str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+                )
+                PanelHandler.next_fixture = (ascii_code, accepted_image)
+                _, saved_body, _ = post(
                     {
-                        "action": "save",
-                        "row_id": "1",
-                        "revision": revision.group(1).decode(),
-                        "mode": "edit",
-                        "label": "4567",
+                        "action": "submit",
+                        "csrf_token": csrf_token,
+                        "challenge_id": accepted_challenge,
+                        "label": persian_code,
                     }
                 )
-                self.assertIn(b"corrected", corrected_page)
+                saved = json.loads(saved_body)
+                self.assertEqual(saved["outcome"], "saved")
+                self.assertEqual(saved["saved_this_session"], 1)
 
-                state = sqlite3.connect(dataset / "verification.sqlite")
-                try:
-                    saved = state.execute(
-                        "SELECT label, verified, dirty FROM labels WHERE id = 1"
-                    ).fetchone()
-                    pending = state.execute(
-                        "SELECT value FROM metadata WHERE key = 'pending_count'"
-                    ).fetchone()
-                finally:
-                    state.close()
-                self.assertEqual(saved, ("4567", 1, 1))
-                self.assertEqual(pending, ("1",))
-
-                _, synced_page, _ = post({"action": "sync"})
-                self.assertIn(b"updated atomically", synced_page)
                 with csv_path.open(newline="", encoding="utf-8") as source:
                     rows = list(csv.DictReader(source))
-                self.assertEqual(rows[1]["label"], "4567")
+                self.assertEqual(len(rows), 2)
+                self.assertEqual(rows[0]["filename"], old_image.relative_to(dataset).as_posix())
+                self.assertEqual(rows[1]["label"], ascii_code)
+                self.assertEqual(rows[1]["batch_id"], "panel")
                 self.assertEqual(rows[1]["verified"], "1")
-                self.assertEqual(rows[2]["verified"], "0")
+                self.assertEqual(
+                    rows[1]["hash"],
+                    hashlib.sha256(accepted_image).hexdigest(),
+                )
+                self.assertEqual(
+                    (dataset / rows[1]["filename"]).read_bytes(),
+                    accepted_image,
+                )
 
-                state = sqlite3.connect(dataset / "verification.sqlite")
-                try:
-                    pending = state.execute(
-                        "SELECT value FROM metadata WHERE key = 'pending_count'"
-                    ).fetchone()
-                finally:
-                    state.close()
-                self.assertEqual(pending, ("0",))
+                duplicate_challenge = saved["challenge"]["id"]
+                _, duplicate_image, _ = get(
+                    f"?action=captcha&id={duplicate_challenge}"
+                )
+                self.assertEqual(duplicate_image, accepted_image)
+                _, duplicate_body, _ = post(
+                    {
+                        "action": "submit",
+                        "csrf_token": csrf_token,
+                        "challenge_id": duplicate_challenge,
+                        "label": ascii_code,
+                    }
+                )
+                duplicate = json.loads(duplicate_body)
+                self.assertEqual(duplicate["outcome"], "duplicate")
+                self.assertEqual(duplicate["saved_this_session"], 1)
+                with csv_path.open(newline="", encoding="utf-8") as source:
+                    self.assertEqual(len(list(csv.DictReader(source))), 2)
 
-                with self.assertRaises(urllib.error.HTTPError) as missing:
-                    get("?action=image&id=999")
-                self.assertEqual(missing.exception.code, 404)
-                missing.exception.close()
+                # Removing the old dataset must not require resetting collector state.
+                next_challenge = duplicate["challenge"]["id"]
+                _, recreated_image, _ = get(
+                    f"?action=captcha&id={next_challenge}"
+                )
+                recreate_code = PanelHandler.latest_code
+                shutil.rmtree(dataset)
+                _, recreated_body, _ = post(
+                    {
+                        "action": "submit",
+                        "csrf_token": csrf_token,
+                        "challenge_id": next_challenge,
+                        "label": recreate_code,
+                    }
+                )
+                recreated = json.loads(recreated_body)
+                self.assertEqual(recreated["outcome"], "saved")
+                with csv_path.open(newline="", encoding="utf-8") as source:
+                    recreated_rows = list(csv.DictReader(source))
+                self.assertEqual(len(recreated_rows), 1)
+                self.assertEqual(
+                    (dataset / recreated_rows[0]["filename"]).read_bytes(),
+                    recreated_image,
+                )
 
-                with csv_path.open("a", encoding="utf-8") as output:
-                    output.write("\n")
-                with self.assertRaises(urllib.error.HTTPError) as conflict:
-                    get()
-                self.assertEqual(conflict.exception.code, 409)
-                self.assertIn(b"The source CSV changed", conflict.exception.read())
-                conflict.exception.close()
+                PanelHandler.reject_credentials = True
+                credential_challenge = recreated["challenge"]["id"]
+                credential_code = PanelHandler.latest_code
+                with self.assertRaises(urllib.error.HTTPError) as credentials:
+                    post(
+                        {
+                            "action": "submit",
+                            "csrf_token": csrf_token,
+                            "challenge_id": credential_challenge,
+                            "label": credential_code,
+                        }
+                    )
+                self.assertEqual(credentials.exception.code, 502)
+                credential_payload = json.loads(credentials.exception.read())
+                self.assertIn("username or password", credential_payload["error"])
+                self.assertIsNone(credential_payload["challenge"])
+                credentials.exception.close()
+                with csv_path.open(newline="", encoding="utf-8") as source:
+                    self.assertEqual(len(list(csv.DictReader(source))), 1)
+
+                node = shutil.which("node")
+                if node is not None:
+                    syntax = subprocess.run(
+                        [node, "--check", str(PROJECT / "web" / "app.js")],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertEqual(syntax.returncode, 0, syntax.stderr)
             finally:
-                server.terminate()
+                collector.terminate()
                 try:
-                    server.wait(timeout=5)
+                    collector.wait(timeout=5)
                 except subprocess.TimeoutExpired:
-                    server.kill()
-                    server.wait(timeout=5)
-                if server.stderr is not None:
-                    server.stderr.close()
+                    collector.kill()
+                    collector.wait(timeout=5)
+                if collector.stderr is not None:
+                    collector.stderr.close()
+                panel_server.shutdown()
+                panel_server.server_close()
+                panel_thread.join(timeout=5)
 
 
 if __name__ == "__main__":

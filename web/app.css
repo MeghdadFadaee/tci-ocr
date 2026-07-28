@@ -1,0 +1,249 @@
+:root {
+    color-scheme: dark;
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: #09111d;
+    color: #eaf1fb;
+    --panel: #111d2d;
+    --line: #26364b;
+    --muted: #91a2b8;
+    --accent: #67e8b8;
+    --accent-dark: #073c31;
+    --danger: #ff9a9a;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    min-height: 100dvh;
+    margin: 0;
+    background:
+        radial-gradient(circle at top, rgba(46, 91, 126, .28), transparent 36rem),
+        #09111d;
+}
+
+button,
+input {
+    font: inherit;
+}
+
+.shell {
+    width: min(100% - 2rem, 42rem);
+    margin: 0 auto;
+    padding: max(1.25rem, env(safe-area-inset-top)) 0 max(2rem, env(safe-area-inset-bottom));
+}
+
+.topbar {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.2rem;
+}
+
+.eyebrow {
+    margin: 0 0 .2rem;
+    color: var(--accent);
+    font-size: .75rem;
+    font-weight: 800;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+}
+
+h1,
+h2,
+p {
+    margin-top: 0;
+}
+
+h1 {
+    margin-bottom: 0;
+    font-size: clamp(1.55rem, 6vw, 2.2rem);
+}
+
+.counter {
+    flex: 0 0 auto;
+    text-align: right;
+}
+
+.counter strong {
+    display: block;
+    color: var(--accent);
+    font-size: 1.5rem;
+    line-height: 1;
+}
+
+.counter span,
+.privacy {
+    color: var(--muted);
+    font-size: .78rem;
+}
+
+.status {
+    min-height: 2.8rem;
+    margin-bottom: .9rem;
+    padding: .75rem .9rem;
+    border: 1px solid rgba(103, 232, 184, .24);
+    border-radius: .8rem;
+    background: rgba(103, 232, 184, .08);
+    color: #c7f9e8;
+}
+
+.status.error {
+    border-color: rgba(255, 154, 154, .3);
+    background: rgba(255, 99, 99, .09);
+    color: var(--danger);
+}
+
+.card {
+    padding: clamp(1rem, 4vw, 1.6rem);
+    border: 1px solid var(--line);
+    border-radius: 1.15rem;
+    background: rgba(17, 29, 45, .96);
+    box-shadow: 0 1.5rem 4rem rgba(0, 0, 0, .28);
+}
+
+.image-stage {
+    display: grid;
+    min-height: 9.5rem;
+    place-items: center;
+    margin-bottom: 1.2rem;
+    border: 1px solid var(--line);
+    border-radius: .9rem;
+    background: #f3f6fa;
+    overflow: hidden;
+}
+
+.image-stage img {
+    width: min(100%, 27.5rem);
+    height: auto;
+    image-rendering: auto;
+}
+
+label {
+    display: block;
+    margin-bottom: .45rem;
+    color: var(--muted);
+    font-size: .86rem;
+    font-weight: 700;
+}
+
+.entry-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .7rem;
+}
+
+input {
+    min-width: 0;
+    height: 3.35rem;
+    padding: 0 .95rem;
+    border: 1px solid #39506c;
+    border-radius: .75rem;
+    outline: 0;
+    background: #09131f;
+    color: #fff;
+    font-size: 1.25rem;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: .08em;
+}
+
+input:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 .2rem rgba(103, 232, 184, .12);
+}
+
+button,
+.button-link {
+    min-height: 3.35rem;
+    padding: 0 1rem;
+    border: 0;
+    border-radius: .75rem;
+    cursor: pointer;
+    font-weight: 800;
+    text-decoration: none;
+}
+
+button:disabled {
+    cursor: wait;
+    opacity: .55;
+}
+
+.primary {
+    background: var(--accent);
+    color: var(--accent-dark);
+}
+
+.secondary {
+    width: 100%;
+    min-height: 2.8rem;
+    margin-top: .7rem;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--muted);
+}
+
+.button-link {
+    display: inline-flex;
+    align-items: center;
+}
+
+.unavailable {
+    padding: 2rem 1rem;
+    text-align: center;
+}
+
+.unavailable p {
+    color: var(--muted);
+}
+
+.privacy {
+    margin: .9rem 0 0;
+    text-align: center;
+}
+
+[hidden] {
+    display: none !important;
+}
+
+@media (max-width: 560px) {
+    .shell {
+        width: min(100% - 1rem, 42rem);
+        padding-top: max(.7rem, env(safe-area-inset-top));
+    }
+
+    .topbar {
+        align-items: center;
+        margin-bottom: .7rem;
+    }
+
+    .counter span {
+        display: none;
+    }
+
+    .card {
+        padding: .8rem;
+        border-radius: .9rem;
+    }
+
+    .image-stage {
+        min-height: 7.7rem;
+        margin-bottom: .8rem;
+    }
+
+    .entry-row {
+        grid-template-columns: minmax(0, 1fr) 7.3rem;
+        gap: .45rem;
+    }
+
+    input,
+    button {
+        height: 3.2rem;
+    }
+
+    .primary {
+        padding: 0 .65rem;
+        font-size: .88rem;
+    }
+}

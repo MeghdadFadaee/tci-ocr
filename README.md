@@ -101,70 +101,58 @@ The verifier builds a complete temporary CSV and atomically replaces the origina
 when you quit, so the CSV cannot be left half-written. If it is interrupted while
 copying or displaying rather than at the prompt, the original CSV remains unchanged.
 
-## 5. Verify labels in a web browser
+## 5. Collect panel-validated captchas
 
-The PHP verifier provides the same sequential labeling workflow without Kitty,
-Python packages, Composer, or a framework. It requires PHP 8.1 or newer with
-PDO SQLite and Fileinfo enabled.
+The dependency-free PHP collector downloads a fresh captcha from the customer
+panel and validates your transcription with a real login attempt. An image is
+added to the dataset only when the panel responds with its successful login
+redirect. Rejected, expired, or skipped captchas are discarded.
 
-Start it locally from the repository root:
+The collector requires PHP 8.1 or newer with sessions, OpenSSL, and the standard
+HTTP stream wrapper enabled. Start it from the repository root:
 
 ```bash
 php -S 127.0.0.1:8080 -t web
 ```
 
-Then open `http://127.0.0.1:8080`. On the first visit, click **Initialize
-verifier**. The browser incrementally imports `dataset/labels.csv` into
-`dataset/verification.sqlite`; progress is resumable if the page or server is
-stopped.
+Open `http://127.0.0.1:8080`, enter the number, and press Enter. ASCII, Persian,
+and Arabic digits are accepted and normalized to ASCII. The next challenge is
+loaded without a page refresh so the numeric keyboard stays open on phones.
 
-Each accepted label is immediately committed to SQLite. ASCII, Persian, and
-Arabic digits are accepted and normalized to ASCII. Enter saves and advances;
-an empty Enter or **Skip for now** leaves the row unverified and advances. Recent
-labels can be opened and corrected without moving the main queue.
-
-On phones, focusing the number field switches to a compact entry layout that
-keeps the captcha, input, and Next button above the software keyboard. Save and
-skip requests update the next image in place, so the page does not reload and
-the numeric keyboard stays open between labels.
-
-The page deliberately does not rewrite the large CSV after every answer. The
-header shows how many rows have not yet been copied back. Click **Sync
-labels.csv** before training, copying the dataset, or using another Python tool.
-Sync writes a complete neighboring temporary file and atomically replaces
-`labels.csv`; a failed write leaves the existing CSV unchanged.
-
-Do not run `verify_labels.py`, the downloader, or another process that changes
-`labels.csv` while the web verifier is active. The page detects an external CSV
-change and stops rather than overwriting it. To move the dataset to another
-machine, sync first and copy the dataset normally; the destination can rebuild
-its SQLite state from the synced CSV.
-
-### Use another dataset directory
-
-The default dataset is the repository's `dataset/` directory. Set
-`OCR_DATASET_DIR` to use another location:
+By default the collector connects to `https://panel.mvphub.ir` with the panel's
+demo credentials (`username` / `password`) and appends to `dataset/labels.csv`.
+Set real credentials through the process environment:
 
 ```bash
-OCR_DATASET_DIR=/data/persian-ocr \
-  php -S 127.0.0.1:8080 -t web
+PANEL_LOGIN_USERNAME='your-user' \
+PANEL_LOGIN_PASSWORD='your-password' \
+php -S 127.0.0.1:8080 -t web
 ```
 
-`OCR_STATE_PATH` can optionally place `verification.sqlite` elsewhere. The PHP
-process must be able to read the CSV and images and write the SQLite database,
-its lock/WAL files, and temporary CSV files. Grant the PHP-FPM user ownership or
-a targeted ACL; do not make the directory world-writable.
+The supported settings are:
+
+- `PANEL_BASE_URL` — panel origin; defaults to `https://panel.mvphub.ir`.
+- `PANEL_LOGIN_USERNAME` — login username; defaults to `username`.
+- `PANEL_LOGIN_PASSWORD` — plaintext login password; defaults to `password`.
+- `PANEL_REQUEST_TIMEOUT` — upstream timeout in seconds; defaults to `10`.
+- `OCR_DATASET_DIR` — output dataset; defaults to the repository's `dataset/`.
+
+Validated images use content-addressed paths below `images/panel/`. The collector
+appends rows with `batch_id=panel` and `verified=1`, while preserving all existing
+CSV rows. Writes are locked, flushed, and exact-image duplicates are idempotent.
+If the dataset directory or CSV has been removed, it is recreated automatically.
+Legacy `verification.sqlite` files are ignored.
+
+Keep the collector private: it has no user authentication and holds the panel
+credentials in the PHP process environment. The PHP user needs write permission
+for the dataset directory. Do not expose `dataset/` as a public web directory.
 
 ### Minimal Nginx configuration
-
-Use `web/` as the public document root so the CSV, SQLite state, images, and
-Python source files are not directly downloadable. The page safely streams the
-selected image itself.
 
 ```nginx
 server {
     listen 80;
-    server_name verifier.example.internal;
+    server_name collector.example.internal;
     root /srv/tci-ocr/web;
     index index.php;
 
@@ -176,6 +164,9 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root/index.php;
         fastcgi_param OCR_DATASET_DIR /srv/tci-ocr/dataset;
+        fastcgi_param PANEL_BASE_URL https://panel.mvphub.ir;
+        fastcgi_param PANEL_LOGIN_USERNAME your-user;
+        fastcgi_param PANEL_LOGIN_PASSWORD your-password;
         fastcgi_pass unix:/run/php/php8.3-fpm.sock;
     }
 
@@ -185,6 +176,5 @@ server {
 }
 ```
 
-Adjust the PHP-FPM socket and paths for the server. The application intentionally
-contains no authentication; add Nginx basic authentication to the `server` or
-`location /` block, or expose it only on a private network.
+Prefer protected PHP-FPM environment configuration for real secrets instead of
+putting them directly in a shared Nginx configuration.
